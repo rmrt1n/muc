@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 #include <ctype.h>
 
 typedef struct Token {
@@ -8,15 +9,19 @@ typedef struct Token {
         TOKEN_ID, TOKEN_INT, TOKEN_SEMICOLON,
         TOKEN_LPAREN, TOKEN_RPAREN, TOKEN_LBRACE, TOKEN_RBRACE,
         TOKEN_MINUS, TOKEN_TILDE, TOKEN_BANG,
-        TOKEN_PLUS, TOKEN_MUL, TOKEN_DIV
+        TOKEN_PLUS, TOKEN_MUL, TOKEN_DIV,
+        TOKEN_AND, TOKEN_OR, TOKEN_EQ, TOKEN_NEQ,
+        TOKEN_LT, TOKEN_LTE, TOKEN_GT, TOKEN_GTE
     } type;
     char *value;
 } Token;
 
-enum {
+enum op_type {
     NEG, BITW_NOT, LOGIC_NOT,
-    ADD, SUB, MUL, DIV
-} op_type;
+    ADD, SUB, MUL, DIV,
+    LT, LTE, GT, GTE, EQ, NEQ,
+    LOGIC_AND, LOGIC_OR
+};
 
 typedef struct AST {
     enum {
@@ -51,46 +56,59 @@ typedef struct Parser {
 // grammar
 // program -> func
 // func -> "int" "main" "(" ")" "{" stmt "}"
-// stmt -> "return" exp ";"
-// exp -> term
-// term -> factor {("+" | "-") factor}
-// factor -> unary {("*" | "/") unary}
+// stmt -> "return" expr ";"
+// expr -> logic-or
+// logic-or -> logic-and {"||" logic-and}
+// logic-and -> equality {"&&" equality}
+// equality -> comparison {("==" | "!=") comparison}
+// comparison -> addition {("<" | "<=" | ">" | ">=") addition}
+// addition -> multiplication {("+" | "-") multiplication}
+// multiplication -> unary {("*" | "/") unary}
 // unary -> unop unary
 // primary -> "(" exp ")" | int
 // unop -> "-" | "~" | "!"
 // int -> (-)[0-9]+
 
+// helper funcs
 void *dmalloc(size_t size);
 void *drealloc(void *p, size_t size);
+int strtoi(char *str);
+void print_spaces(int n);
+// token && lexer funcs
 Token *token_init(int type, char *value);
 void token_free(Token *token);
 void eat_whitespace(FILE *fp);
 char peek(FILE *fp);
 Token *get_next_token(FILE *fp);
+// ast && parser funcs
 AST *ast_init(int type);
 void ast_free(AST *ast);
 void expect_id(Token *token, char *id);
-int strtoi(char *str);
 Parser *parser_init(FILE *fp);
 void parser_free(Parser *parser);
 void parser_eat(Parser *parser, int token_type);
 AST *parse_primary(Parser *parser);
 AST *parse_unary(Parser *parser);
-AST *parse_factor(Parser *parser);
-AST *parse_term(Parser *parser);
+AST *parse_multiplication(Parser *parser);
+AST *parse_addition(Parser *parser);
+AST *parse_comparison(Parser *parser);
+AST *parse_equality(Parser *parser);
+AST *parse_logic_and(Parser *parser);
+AST *parse_logic_or(Parser *parser);
 AST *parse_expr(Parser *parser);
 AST *parse_stmt(Parser *parser);
 AST *parse_func(Parser *parser);
 AST *parse(Parser *parser);
-void print_spaces(int n);
+// debugging funcs
 void debug_print_token(Token *token);
 void debug_print_op(int op_type);
 void debug_print_ast(AST *ast, int n);
+// code gen funcs
 void setup(FILE *fp);
 void write_unop(FILE *fp, AST *ast);
-void write_binop_operands(FILE *fp, AST *src, AST *dst);
-void write_binop(FILE *fp, AST *ast);
-void write_ast(FILE *fp, AST *ast);
+void write_binop_operands(FILE *fp, AST *src, AST *dst, int *x, bool flag);
+void write_binop(FILE *fp, AST *ast, int *x, bool flag);
+void write_ast(FILE *fp, AST *ast, int *x, bool flag);
 
 int main(int argc, char **argv) {
     if (argc > 2) {
@@ -125,7 +143,8 @@ int main(int argc, char **argv) {
         target = fopen(filename, "w");
     }
     setup(target);
-    write_ast(target, ast);
+    int label = 0;
+    write_ast(target, ast, &label, true);
 
     // cleanup
     fclose(target);
@@ -222,10 +241,50 @@ Token *get_next_token(FILE *fp) {
             case ';': return token_init(TOKEN_SEMICOLON, NULL);
             case '-': return token_init(TOKEN_MINUS, NULL);
             case '~': return token_init(TOKEN_TILDE, NULL);
-            case '!': return token_init(TOKEN_BANG, NULL);
+            case '!':
+                if (peek(fp) == '=') {
+                    getc(fp);
+                    return token_init(TOKEN_NEQ, NULL);
+                }
+                return token_init(TOKEN_BANG, NULL);
             case '+': return token_init(TOKEN_PLUS, NULL);
             case '*': return token_init(TOKEN_MUL, NULL);
             case '/': return token_init(TOKEN_DIV, NULL);
+            case '&':
+                if (peek(fp) == '&') {
+                    getc(fp);
+                    return token_init(TOKEN_AND, NULL);
+                }
+                // return token_init(TOKEN_BWAND, NULL);
+                break;
+            case '|':
+                if (peek(fp) == '|') {
+                    getc(fp);
+                    return token_init(TOKEN_OR, NULL);
+                }
+                // return token_init(TOKEN_BWOR, NULL);
+                break;
+            case '<':
+                if (peek(fp) == '=') {
+                    getc(fp);
+                    return token_init(TOKEN_LTE, NULL);
+                }
+                return token_init(TOKEN_LT, NULL);
+                break;
+            case '>':
+                if (peek(fp) == '=') {
+                    getc(fp);
+                    return token_init(TOKEN_GTE, NULL);
+                }
+                return token_init(TOKEN_GT, NULL);
+                break;
+            case '=':
+                if (peek(fp) == '=') {
+                    getc(fp);
+                    return token_init(TOKEN_EQ, NULL);
+                }
+                // return token_init(TOKEN_ASSIGN, NULL);
+                break;
         }
     }
     return NULL;
@@ -324,39 +383,32 @@ AST *parse_primary(Parser *parser) {
 AST *parse_unary(Parser *parser) {
     AST *node;
     Token *token = parser->cur_token;
-    switch (token->type) {
-        case TOKEN_MINUS:
-            parser_eat(parser, TOKEN_MINUS);
-            node = ast_init(AST_UNOP);
-            node->node.unop.type = NEG;
-            node->node.unop.expr = parse_unary(parser);
-            break;
-        case TOKEN_TILDE:
-            parser_eat(parser, TOKEN_TILDE);
-            node = ast_init(AST_UNOP);
-            node->node.unop.type = BITW_NOT;
-            node->node.unop.expr = parse_unary(parser);
-            break;
-        case TOKEN_BANG:
-            parser_eat(parser, TOKEN_BANG);
-            node = ast_init(AST_UNOP);
-            node->node.unop.type = LOGIC_NOT;
-            node->node.unop.expr = parse_unary(parser);
-            break;
-        default:
-            node = parse_primary(parser);
+    if (token->type == TOKEN_MINUS ||
+        token->type == TOKEN_TILDE ||
+        token->type == TOKEN_BANG) {
+        node = ast_init(AST_UNOP);
+        switch (token->type) {
+            case TOKEN_MINUS: node->node.unop.type = NEG; break;
+            case TOKEN_TILDE: node->node.unop.type = BITW_NOT; break;
+            case TOKEN_BANG: node->node.unop.type = LOGIC_NOT; break;
+            default: err_unexpected_token(token);
+        }
+        parser_eat(parser, token->type);
+        node->node.unop.expr = parse_unary(parser);
+    } else {
+        node = parse_primary(parser);
     }
     return node;
 }
 
-AST *parse_factor(Parser *parser) {
+AST *parse_multiplication(Parser *parser) {
     AST *node = parse_unary(parser); 
     Token *token = parser->cur_token;
     while (token->type == TOKEN_MUL || token->type == TOKEN_DIV) {
         AST *unary = node;
         node = ast_init(AST_BINOP);
         node->node.binop.type = token->type == TOKEN_MUL ? MUL : DIV;
-        parser_eat(parser, token->type == TOKEN_MUL ? TOKEN_MUL : TOKEN_DIV);
+        parser_eat(parser, token->type);
         node->node.binop.left = unary;
         node->node.binop.right = parse_unary(parser);
         token = parser->cur_token;
@@ -364,23 +416,92 @@ AST *parse_factor(Parser *parser) {
     return node;
 }
 
-AST *parse_term(Parser *parser) {
-    AST *node = parse_factor(parser);
+AST *parse_addition(Parser *parser) {
+    AST *node = parse_multiplication(parser);
     Token *token = parser->cur_token;
     while (token->type == TOKEN_PLUS || token->type == TOKEN_MINUS) {
         AST *factor = node;
         node = ast_init(AST_BINOP);
         node->node.binop.type = token->type == TOKEN_PLUS ? ADD : SUB;
-        parser_eat(parser, token->type == TOKEN_PLUS ? TOKEN_PLUS : TOKEN_MINUS);
+        parser_eat(parser, token->type);
         node->node.binop.left = factor;
-        node->node.binop.right = parse_factor(parser);
+        node->node.binop.right = parse_multiplication(parser);
+        token = parser->cur_token;
+    }
+    return node;
+}
+
+AST *parse_comparison(Parser *parser) {
+    AST *node = parse_addition(parser);
+    Token *token = parser->cur_token;
+    while (token->type == TOKEN_LT  ||
+           token->type == TOKEN_LTE ||
+           token->type == TOKEN_GT  ||
+           token->type == TOKEN_GTE) {
+        AST *comparison = node;
+        node = ast_init(AST_BINOP);
+        switch (token->type) {
+            case TOKEN_LT: node->node.binop.type = LT; break;
+            case TOKEN_LTE: node->node.binop.type = LTE; break;
+            case TOKEN_GT: node->node.binop.type = GT; break;
+            case TOKEN_GTE: node->node.binop.type = GTE; break;
+            default: err_unexpected_token(token);
+        }
+        parser_eat(parser, token->type);
+        node->node.binop.left = comparison;
+        node->node.binop.right = parse_addition(parser);
+        token = parser->cur_token;
+    }
+    return node;
+}
+
+AST *parse_equality(Parser *parser) {
+    AST *node = parse_comparison(parser);
+    Token *token = parser->cur_token;
+    while (token->type == TOKEN_EQ || token->type == TOKEN_NEQ) {
+        AST *comparison = node;
+        node = ast_init(AST_BINOP);
+        node->node.binop.type = token->type == TOKEN_EQ ? EQ : NEQ;
+        parser_eat(parser, token->type);
+        node->node.binop.left = comparison;
+        node->node.binop.right = parse_comparison(parser);
+        token = parser->cur_token;
+    }
+    return node;
+}
+
+AST *parse_logic_and(Parser *parser) {
+    AST *node = parse_equality(parser);
+    Token *token = parser->cur_token;
+    while (token->type == TOKEN_AND) {
+        AST *equality = node;
+        node = ast_init(AST_BINOP);
+        node->node.binop.type = LOGIC_AND;
+        parser_eat(parser, token->type);
+        node->node.binop.left = equality;
+        node->node.binop.right = parse_equality(parser);
+        token = parser->cur_token;
+    }
+    return node;
+}
+
+AST *parse_logic_or(Parser *parser) {
+    AST *node = parse_logic_and(parser);
+    Token *token = parser->cur_token;
+    while (token->type == TOKEN_OR) {
+        AST *logic_and = node;
+        node = ast_init(AST_BINOP);
+        node->node.binop.type = LOGIC_OR;
+        parser_eat(parser, token->type);
+        node->node.binop.left = logic_and;
+        node->node.binop.right = parse_logic_and(parser);
         token = parser->cur_token;
     }
     return node;
 }
 
 AST *parse_expr(Parser *parser) {
-    return parse_term(parser);
+    return parse_logic_or(parser);
 }
 
 AST *parse_stmt(Parser *parser) {
@@ -414,20 +535,25 @@ AST *parse_func(Parser *parser) {
     node->node.function.body = func_body;
     parser_eat(parser, TOKEN_RBRACE);
     return node;
-    
 }
 
 AST *parse(Parser *parser) {
     return parse_func(parser);
 }
 
+void print_spaces(int n) {
+    while (n--) printf(" ");
+}
+
 void debug_print_token(Token *token) {
     int type = token->type;
     switch (type) {
+        case TOKEN_INT: printf("TOKEN_INT: %s\n", token->value); break;
+        case TOKEN_ID: printf("TOKEN_ID: %s\n", token->value); break;
         case TOKEN_LPAREN: puts("TOKEN_LPAREN: ("); break;
         case TOKEN_RPAREN: puts("TOKEN_LPAREN: )"); break;
         case TOKEN_LBRACE: puts("TOKEN_LPAREN: {"); break;
-        case TOKEN_RBRACE: puts("TOKEN_LPAREN: }"); break;
+        case TOKEN_RBRACE: puts("TOKEN_RPAREN: }"); break;
         case TOKEN_SEMICOLON: puts("TOKEN_LPAREN: ;"); break;
         case TOKEN_MINUS: puts("TOKEN_MINUS: -"); break;
         case TOKEN_TILDE: puts("TOKEN_TILDE: ~"); break;
@@ -435,12 +561,16 @@ void debug_print_token(Token *token) {
         case TOKEN_PLUS: puts("TOKEN_PLUS: +"); break;
         case TOKEN_MUL: puts("TOKEN_MUL: *"); break;
         case TOKEN_DIV: puts("TOKEN_DIV: /"); break;
+        case TOKEN_LT: puts("TOKEN_LT '<'"); break;
+        case TOKEN_LTE: puts("TOKEN_LTE '<='"); break;
+        case TOKEN_GT: puts("TOKEN_GT '>'"); break;
+        case TOKEN_GTE: puts("TOKEN_GTE '>='"); break;
+        case TOKEN_EQ: puts("TOKEN_EQ '=='"); break;
+        case TOKEN_NEQ: puts("TOKEN_NEQ '!='"); break;
+        case TOKEN_AND: puts("TOKEN_AND '&&'"); break;
+        case TOKEN_OR: puts("TOKEN_OR '||'"); break;
         // default: puts("UNKNOWN TOKEN");
     }
-}
-
-void print_spaces(int n) {
-    while (n--) printf(" ");
 }
 
 void debug_print_op(int op_type) {
@@ -452,6 +582,14 @@ void debug_print_op(int op_type) {
         case SUB: puts("SUB '-'"); break;
         case MUL: puts("MUL '*'"); break;
         case DIV: puts("DIV '/'"); break;
+        case LT: puts("LT '<'"); break;
+        case LTE: puts("LTE '<='"); break;
+        case GT: puts("GT '>'"); break;
+        case GTE: puts("GTE '>='"); break;
+        case EQ: puts("EQ '=='"); break;
+        case NEQ: puts("NEQ '!='"); break;
+        case LOGIC_AND: puts("LOGIC_AND '&&'"); break;
+        case LOGIC_OR: puts("LOGIC_OR '||'"); break;
         // default: puts("UNKNOWN OPERATOR");
     }
 }
@@ -534,56 +672,131 @@ void write_unop(FILE *fp, AST *ast) {
     }
 }
 
-void write_binop_operands(FILE *fp, AST *src, AST *dst) {
-    write_ast(fp, src);
+void write_binop_operands(FILE *fp, AST *src, AST *dst, int *x, bool flag) {
+    write_ast(fp, src, x, flag);
     fputs("\tpush rax\n", fp);
-    write_ast(fp, dst);
+    write_ast(fp, dst, x, flag);
     fputs("\tpop rcx\n", fp);
 }
 
-void write_binop(FILE *fp, AST *ast) {
+void write_binop(FILE *fp, AST *ast, int *x, bool flag) {
     AST *left = ast->node.binop.left, *right = ast->node.binop.right;
     switch (ast->node.binop.type) {
         case ADD:
-            write_binop_operands(fp, left, right);
+            write_binop_operands(fp, left, right, x, flag);
             fputs("\tadd rax, rcx\n", fp);
             break;
         case SUB:
-            write_binop_operands(fp, right, left);
+            write_binop_operands(fp, right, left, x, flag);
             fputs("\tsub rax, rcx\n", fp);
             break;
         case MUL:
-            write_binop_operands(fp, left, right);
-            fputs("\tmul rcx\n", fp);
+            write_binop_operands(fp, left, right, x, flag);
+            fputs("\timul rax, rcx\n", fp);
             break;
         case DIV:
-            fputs("\tmov rdx, 0\n", fp);
-            write_binop_operands(fp, right, left);
+            write_binop_operands(fp, right, left, x, flag);
             fputs("\tcqo\n", fp);
             fputs("\tidiv rcx\n", fp);
+            break;
+        case EQ:
+            write_binop_operands(fp, right, left, x, flag);
+            fputs("\tcmp rax, rcx\n", fp);
+            // don't use xor rax, rax here because it changes the eflags
+            fputs("\tmov rax, 0\n", fp);
+            fputs("\tsete al\n", fp);
+            break;
+        case NEQ:
+            write_binop_operands(fp, right, left, x, flag);
+            fputs("\tcmp rax, rcx\n", fp);
+            fputs("\tmov rax, 0\n", fp);
+            fputs("\tsetne al\n", fp);
+            break;
+        case LT:
+            write_binop_operands(fp, right, left, x, flag);
+            fputs("\tcmp rax, rcx\n", fp);
+            fputs("\tmov rax, 0\n", fp);
+            fputs("\tsetl al\n", fp);
+            break;
+        case LTE:
+            write_binop_operands(fp, right, left, x, flag);
+            fputs("\tcmp rax, rcx\n", fp);
+            fputs("\tmov rax, 0\n", fp);
+            fputs("\tsetle al\n", fp);
+            break;
+        case GT:
+            write_binop_operands(fp, right, left, x, flag);
+            fputs("\tcmp rax, rcx\n", fp);
+            fputs("\tmov rax, 0\n", fp);
+            fputs("\tsetg al\n", fp);
+            break;
+        case GTE:
+            write_binop_operands(fp, right, left, x, flag);
+            fputs("\tcmp rax, rcx\n", fp);
+            fputs("\tmov rax, 0\n", fp);
+            fputs("\tsetge al\n", fp);
+            break;
+        case LOGIC_OR:
+            write_ast(fp, left, x, false);
+            if (left->type != AST_BINOP || left->node.binop.type != LOGIC_OR) {
+                fputs("\tcmp rax, 0\n", fp);
+                fprintf(fp, "\tjne .L%d\n", *x + 1);
+            }
+            write_ast(fp, right, x, false);
+            fputs("\tcmp rax, 0\n", fp);
+            fprintf(fp, "\tjne .L%d\n", *x + 1);
+            break;
+        case LOGIC_AND:
+            write_ast(fp, left, x, false);
+            if (left->type != AST_BINOP || left->node.binop.type != LOGIC_AND) {
+                fputs("\tcmp rax, 0\n", fp);
+                fprintf(fp, "\tje .L%d\n", *x + 1);
+            }
+            write_ast(fp, right, x, false);
+            fputs("\tcmp rax, 0\n", fp);
+            fprintf(fp, "\tje .L%d\n", *x + 1);
             break;
     }
 }
 
-void write_ast(FILE *fp, AST *ast) {
+void write_ast(FILE *fp, AST *ast, int *x, bool flag) {
     switch (ast->type) {
         case AST_INT:
             fprintf(fp, "\tmov rax, %d\n", ast->node.integer.value);
             break;
         case AST_RET:
-            write_ast(fp, ast->node.ret_stmt.expr);
+            write_ast(fp, ast->node.ret_stmt.expr, x, flag);
             fputs("\tret\n", fp);
             break;
         case AST_FUNC:
             fprintf(fp, "%s:\n", ast->node.function.id);
-            write_ast(fp, ast->node.function.body);
+            write_ast(fp, ast->node.function.body, x, flag);
             break;
         case AST_UNOP:
-            write_ast(fp, ast->node.unop.expr);
+            write_ast(fp, ast->node.unop.expr, x, flag);
             write_unop(fp, ast);
             break;
         case AST_BINOP:
-            write_binop(fp, ast);
+            write_binop(fp, ast, x, flag);
+            if (flag && ast->node.binop.type == LOGIC_AND) {
+                fputs("\tmov rax, 1\n", fp);
+                fprintf(fp, "\tjmp .L%d\n", *x + 2);
+                fprintf(fp, ".L%d:\n", *x + 1);
+                fputs("\tmov rax, 0\n", fp);
+                fprintf(fp, ".L%d:\n", *x + 2);
+                *x += 2;
+            }
+            if (flag && ast->node.binop.type == LOGIC_OR) {
+                fputs("\tmov rax, 0\n", fp);
+                fprintf(fp, "\tje .L%d\n", *x + 2);
+                fprintf(fp, ".L%d:\n", *x + 1);
+                fputs("\tmov rax, 1\n", fp);
+                fprintf(fp, "\tjmp .L%d\n", *x + 3);
+                fprintf(fp, ".L%d:\n", *x + 2);
+                fputs("\tmov rax, 0\n", fp);
+                fprintf(fp, ".L%d:\n", *x + 3);
+                *x += 3;
+            }
             break;
     }
 }
