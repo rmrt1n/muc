@@ -1,0 +1,28 @@
+checklist:
+01. [x] integers
+02. [ ] constants
+03. [x] unary operators
+04. [x] binary operators
+05. [ ] local variables
+06. [ ] conditionals
+07. [ ] compound statements
+08. [ ] loops
+09. [ ] functions
+10. [ ] global variables
+11. [ ] characters?
+12. [ ] arrays?
+13. [ ] includes?
+14. [ ] ternary operators?
+15. [ ] structs?
+16. [ ] enums?
+17. [ ] unions?
+18. [ ] postfix unary operators?
+19. [ ] strings?
+20. [ ] types?
+21. [ ] pointers?
+22. [ ] 
+
+TODO:
+- implement more binop (%, &, |, ^, <<, >>)
+- use keyword tokens
+    
