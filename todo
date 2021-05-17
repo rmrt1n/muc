@@ -23,6 +23,7 @@ checklist:
 22. [ ] 
 
 TODO:
-- implement more binop (%, &, |, ^, <<, >>)
-- use keyword tokens
+- [x] implement more binop (%, &, |, ^, <<, >>)
+- [x] use keyword tokens
+- [ ] 
     

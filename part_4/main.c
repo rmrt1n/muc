@@ -9,18 +9,22 @@ typedef struct Token {
         TOKEN_ID, TOKEN_INT, TOKEN_SEMICOLON,
         TOKEN_LPAREN, TOKEN_RPAREN, TOKEN_LBRACE, TOKEN_RBRACE,
         TOKEN_MINUS, TOKEN_TILDE, TOKEN_BANG,
-        TOKEN_PLUS, TOKEN_MUL, TOKEN_DIV,
-        TOKEN_AND, TOKEN_OR, TOKEN_EQ, TOKEN_NEQ,
-        TOKEN_LT, TOKEN_LTE, TOKEN_GT, TOKEN_GTE
+        TOKEN_PLUS, TOKEN_MUL, TOKEN_DIV, TOKEN_PERCENT,
+        TOKEN_DOUBLEAMP, TOKEN_DOUBLEPIPE, TOKEN_EQ, TOKEN_NEQ,
+        TOKEN_LT, TOKEN_LTE, TOKEN_GT, TOKEN_GTE,
+        TOKEN_AMP, TOKEN_PIPE, TOKEN_CARET, TOKEN_LSHIFT, TOKEN_RSHIFT,
+        TOKEN_RETURN
     } type;
     char *value;
 } Token;
 
 enum op_type {
     NEG, BITW_NOT, LOGIC_NOT,
-    ADD, SUB, MUL, DIV,
+    ADD, SUB, MUL, DIV, MOD,
     LT, LTE, GT, GTE, EQ, NEQ,
-    LOGIC_AND, LOGIC_OR
+    LOGIC_AND, LOGIC_OR,
+    BITW_AND, BITW_OR, BITW_XOR,
+    LSHIFT, RSHIFT
 };
 
 typedef struct AST {
@@ -59,15 +63,19 @@ typedef struct Parser {
 // stmt -> "return" expr ";"
 // expr -> logic-or
 // logic-or -> logic-and {"||" logic-and}
-// logic-and -> equality {"&&" equality}
-// equality -> comparison {("==" | "!=") comparison}
-// comparison -> addition {("<" | "<=" | ">" | ">=") addition}
+// logic-and -> bitw-or {"&&" bitw-or}
+// bitw-or -> bitw-xor {"|" bitw-xor}
+// bitw-xor -> bitw-and {"^" bitw-and}
+// bitw-and -> equality {"&" equality}
+// equality -> relational {("==" | "!=") relational}
+// relational -> shift {("<" | "<=" | ">" | ">=") shift}
+// shift -> addition {("<<" | ">>") addition}
 // addition -> multiplication {("+" | "-") multiplication}
-// multiplication -> unary {("*" | "/") unary}
+// multiplication -> unary {("*" | "/" | "%") unary}
 // unary -> unop unary
 // primary -> "(" exp ")" | int
 // unop -> "-" | "~" | "!"
-// int -> (-)[0-9]+
+// int -> [0-9]+
 
 // helper funcs
 void *dmalloc(size_t size);
@@ -91,7 +99,7 @@ AST *parse_primary(Parser *parser);
 AST *parse_unary(Parser *parser);
 AST *parse_multiplication(Parser *parser);
 AST *parse_addition(Parser *parser);
-AST *parse_comparison(Parser *parser);
+AST *parse_relational(Parser *parser);
 AST *parse_equality(Parser *parser);
 AST *parse_logic_and(Parser *parser);
 AST *parse_logic_or(Parser *parser);
@@ -215,6 +223,9 @@ Token *get_next_token(FILE *fp) {
             }
             ungetc(c, fp);
             id[size-1] = '\0';
+
+            if (strcmp(id, "return") == 0) return token_init(TOKEN_RETURN, NULL);
+
             return token_init(TOKEN_ID, id);
         }
         // get integer literal, no neg int for now
@@ -250,24 +261,30 @@ Token *get_next_token(FILE *fp) {
             case '+': return token_init(TOKEN_PLUS, NULL);
             case '*': return token_init(TOKEN_MUL, NULL);
             case '/': return token_init(TOKEN_DIV, NULL);
+            case '%': return token_init(TOKEN_PERCENT, NULL);
             case '&':
                 if (peek(fp) == '&') {
                     getc(fp);
-                    return token_init(TOKEN_AND, NULL);
+                    return token_init(TOKEN_DOUBLEAMP, NULL);
                 }
-                // return token_init(TOKEN_BWAND, NULL);
+                return token_init(TOKEN_AMP, NULL);
                 break;
             case '|':
                 if (peek(fp) == '|') {
                     getc(fp);
-                    return token_init(TOKEN_OR, NULL);
+                    return token_init(TOKEN_DOUBLEPIPE, NULL);
                 }
-                // return token_init(TOKEN_BWOR, NULL);
+                return token_init(TOKEN_PIPE, NULL);
                 break;
+            case '^': return token_init(TOKEN_CARET, NULL);
             case '<':
                 if (peek(fp) == '=') {
                     getc(fp);
                     return token_init(TOKEN_LTE, NULL);
+                }
+                if (peek(fp) == '<') {
+                    getc(fp);
+                    return token_init(TOKEN_LSHIFT, NULL);
                 }
                 return token_init(TOKEN_LT, NULL);
                 break;
@@ -275,6 +292,10 @@ Token *get_next_token(FILE *fp) {
                 if (peek(fp) == '=') {
                     getc(fp);
                     return token_init(TOKEN_GTE, NULL);
+                }
+                if (peek(fp) == '>') {
+                    getc(fp);
+                    return token_init(TOKEN_RSHIFT, NULL);
                 }
                 return token_init(TOKEN_GT, NULL);
                 break;
@@ -404,10 +425,17 @@ AST *parse_unary(Parser *parser) {
 AST *parse_multiplication(Parser *parser) {
     AST *node = parse_unary(parser); 
     Token *token = parser->cur_token;
-    while (token->type == TOKEN_MUL || token->type == TOKEN_DIV) {
+    while (token->type == TOKEN_MUL ||
+           token->type == TOKEN_DIV ||
+           token->type == TOKEN_PERCENT) {
         AST *unary = node;
         node = ast_init(AST_BINOP);
-        node->node.binop.type = token->type == TOKEN_MUL ? MUL : DIV;
+        switch (token->type) {
+            case TOKEN_MUL: node->node.binop.type = MUL; break;
+            case TOKEN_DIV: node->node.binop.type = DIV; break;
+            case TOKEN_PERCENT: node->node.binop.type = MOD; break;
+            default: err_unexpected_token(token);
+        }
         parser_eat(parser, token->type);
         node->node.binop.left = unary;
         node->node.binop.right = parse_unary(parser);
@@ -431,14 +459,29 @@ AST *parse_addition(Parser *parser) {
     return node;
 }
 
-AST *parse_comparison(Parser *parser) {
+AST *parse_shift(Parser *parser) {
     AST *node = parse_addition(parser);
+    Token *token = parser->cur_token;
+    while (token->type == TOKEN_LSHIFT || token->type == TOKEN_RSHIFT) {
+        AST *addition = node;
+        node = ast_init(AST_BINOP);
+        node->node.binop.type = token->type == TOKEN_LSHIFT ? LSHIFT : RSHIFT;
+        parser_eat(parser, token->type);
+        node->node.binop.left = addition;
+        node->node.binop.right = parse_addition(parser);
+        token = parser->cur_token;
+    }
+    return node;
+}
+
+AST *parse_relational(Parser *parser) {
+    AST *node = parse_shift(parser);
     Token *token = parser->cur_token;
     while (token->type == TOKEN_LT  ||
            token->type == TOKEN_LTE ||
            token->type == TOKEN_GT  ||
            token->type == TOKEN_GTE) {
-        AST *comparison = node;
+        AST *shift = node;
         node = ast_init(AST_BINOP);
         switch (token->type) {
             case TOKEN_LT: node->node.binop.type = LT; break;
@@ -448,15 +491,15 @@ AST *parse_comparison(Parser *parser) {
             default: err_unexpected_token(token);
         }
         parser_eat(parser, token->type);
-        node->node.binop.left = comparison;
-        node->node.binop.right = parse_addition(parser);
+        node->node.binop.left = shift;
+        node->node.binop.right = parse_shift(parser);
         token = parser->cur_token;
     }
     return node;
 }
 
 AST *parse_equality(Parser *parser) {
-    AST *node = parse_comparison(parser);
+    AST *node = parse_relational(parser);
     Token *token = parser->cur_token;
     while (token->type == TOKEN_EQ || token->type == TOKEN_NEQ) {
         AST *comparison = node;
@@ -464,19 +507,19 @@ AST *parse_equality(Parser *parser) {
         node->node.binop.type = token->type == TOKEN_EQ ? EQ : NEQ;
         parser_eat(parser, token->type);
         node->node.binop.left = comparison;
-        node->node.binop.right = parse_comparison(parser);
+        node->node.binop.right = parse_relational(parser);
         token = parser->cur_token;
     }
     return node;
 }
 
-AST *parse_logic_and(Parser *parser) {
+AST *parse_bitw_and(Parser *parser) {
     AST *node = parse_equality(parser);
     Token *token = parser->cur_token;
-    while (token->type == TOKEN_AND) {
+    while (token->type == TOKEN_AMP) {
         AST *equality = node;
         node = ast_init(AST_BINOP);
-        node->node.binop.type = LOGIC_AND;
+        node->node.binop.type = BITW_AND;
         parser_eat(parser, token->type);
         node->node.binop.left = equality;
         node->node.binop.right = parse_equality(parser);
@@ -485,10 +528,55 @@ AST *parse_logic_and(Parser *parser) {
     return node;
 }
 
+AST *parse_bitw_xor(Parser *parser) {
+    AST *node = parse_bitw_and(parser);
+    Token *token = parser->cur_token;
+    while (token->type == TOKEN_CARET) {
+        AST *bitw_and = node;
+        node = ast_init(AST_BINOP);
+        node->node.binop.type = BITW_XOR;
+        parser_eat(parser, token->type);
+        node->node.binop.left = bitw_and;
+        node->node.binop.right = parse_bitw_and(parser);
+        token = parser->cur_token;
+    }
+    return node;
+}
+
+AST *parse_bitw_or(Parser *parser) {
+    AST *node = parse_bitw_xor(parser);
+    Token *token = parser->cur_token;
+    while (token->type == TOKEN_PIPE) {
+        AST *bitw_xor = node;
+        node = ast_init(AST_BINOP);
+        node->node.binop.type = BITW_OR;
+        parser_eat(parser, token->type);
+        node->node.binop.left = bitw_xor;
+        node->node.binop.right = parse_bitw_xor(parser);
+        token = parser->cur_token;
+    }
+    return node;
+}
+
+AST *parse_logic_and(Parser *parser) {
+    AST *node = parse_bitw_or(parser);
+    Token *token = parser->cur_token;
+    while (token->type == TOKEN_DOUBLEAMP) {
+        AST *equality = node;
+        node = ast_init(AST_BINOP);
+        node->node.binop.type = LOGIC_AND;
+        parser_eat(parser, token->type);
+        node->node.binop.left = equality;
+        node->node.binop.right = parse_bitw_or(parser);
+        token = parser->cur_token;
+    }
+    return node;
+}
+
 AST *parse_logic_or(Parser *parser) {
     AST *node = parse_logic_and(parser);
     Token *token = parser->cur_token;
-    while (token->type == TOKEN_OR) {
+    while (token->type == TOKEN_DOUBLEPIPE) {
         AST *logic_and = node;
         node = ast_init(AST_BINOP);
         node->node.binop.type = LOGIC_OR;
@@ -507,8 +595,8 @@ AST *parse_expr(Parser *parser) {
 AST *parse_stmt(Parser *parser) {
     AST *node = ast_init(AST_RET);
     // parse return keyword
-    expect_id(parser->cur_token, "return");
-    parser_eat(parser, TOKEN_ID);
+    // expect_id(parser->cur_token, "return");
+    parser_eat(parser, TOKEN_RETURN);
     // parse expr
     AST *expr = parse_expr(parser);
     node->node.ret_stmt.expr = expr;
@@ -550,25 +638,31 @@ void debug_print_token(Token *token) {
     switch (type) {
         case TOKEN_INT: printf("TOKEN_INT: %s\n", token->value); break;
         case TOKEN_ID: printf("TOKEN_ID: %s\n", token->value); break;
-        case TOKEN_LPAREN: puts("TOKEN_LPAREN: ("); break;
-        case TOKEN_RPAREN: puts("TOKEN_LPAREN: )"); break;
-        case TOKEN_LBRACE: puts("TOKEN_LPAREN: {"); break;
-        case TOKEN_RBRACE: puts("TOKEN_RPAREN: }"); break;
-        case TOKEN_SEMICOLON: puts("TOKEN_LPAREN: ;"); break;
-        case TOKEN_MINUS: puts("TOKEN_MINUS: -"); break;
-        case TOKEN_TILDE: puts("TOKEN_TILDE: ~"); break;
-        case TOKEN_BANG: puts("TOKEN_BANG: !"); break;
-        case TOKEN_PLUS: puts("TOKEN_PLUS: +"); break;
-        case TOKEN_MUL: puts("TOKEN_MUL: *"); break;
-        case TOKEN_DIV: puts("TOKEN_DIV: /"); break;
+        case TOKEN_LPAREN: puts("TOKEN_LPAREN: '('"); break;
+        case TOKEN_RPAREN: puts("TOKEN_LPAREN: ')'"); break;
+        case TOKEN_LBRACE: puts("TOKEN_LPAREN: '{'"); break;
+        case TOKEN_RBRACE: puts("TOKEN_RPAREN: '}'"); break;
+        case TOKEN_SEMICOLON: puts("TOKEN_LPAREN: ';'"); break;
+        case TOKEN_MINUS: puts("TOKEN_MINUS: '-'"); break;
+        case TOKEN_TILDE: puts("TOKEN_TILDE: '~'"); break;
+        case TOKEN_BANG: puts("TOKEN_BANG: '!'"); break;
+        case TOKEN_PLUS: puts("TOKEN_PLUS: '+'"); break;
+        case TOKEN_MUL: puts("TOKEN_MUL: '*'"); break;
+        case TOKEN_DIV: puts("TOKEN_DIV: '/'"); break;
+        case TOKEN_PERCENT: puts("TOKEN_PERCENT: '%'"); break;
         case TOKEN_LT: puts("TOKEN_LT '<'"); break;
         case TOKEN_LTE: puts("TOKEN_LTE '<='"); break;
         case TOKEN_GT: puts("TOKEN_GT '>'"); break;
         case TOKEN_GTE: puts("TOKEN_GTE '>='"); break;
         case TOKEN_EQ: puts("TOKEN_EQ '=='"); break;
         case TOKEN_NEQ: puts("TOKEN_NEQ '!='"); break;
-        case TOKEN_AND: puts("TOKEN_AND '&&'"); break;
-        case TOKEN_OR: puts("TOKEN_OR '||'"); break;
+        case TOKEN_DOUBLEAMP: puts("TOKEN_DOUBLEAMP '&&'"); break;
+        case TOKEN_DOUBLEPIPE: puts("TOKEN_DOUBLEPIPE '||'"); break;
+        case TOKEN_AMP: puts("TOKEN_AMP '&'"); break;
+        case TOKEN_PIPE: puts("TOKEN_PIPE '|'"); break;
+        case TOKEN_CARET: puts("TOKEN_CARET '^'"); break;
+        case TOKEN_LSHIFT: puts("TOKEN_LSHIFT '<<'"); break;
+        case TOKEN_RSHIFT: puts("TOKEN_RSHIFT '>>'"); break;
         // default: puts("UNKNOWN TOKEN");
     }
 }
@@ -582,6 +676,7 @@ void debug_print_op(int op_type) {
         case SUB: puts("SUB '-'"); break;
         case MUL: puts("MUL '*'"); break;
         case DIV: puts("DIV '/'"); break;
+        case MOD: puts("MOD '%'"); break;
         case LT: puts("LT '<'"); break;
         case LTE: puts("LTE '<='"); break;
         case GT: puts("GT '>'"); break;
@@ -590,7 +685,11 @@ void debug_print_op(int op_type) {
         case NEQ: puts("NEQ '!='"); break;
         case LOGIC_AND: puts("LOGIC_AND '&&'"); break;
         case LOGIC_OR: puts("LOGIC_OR '||'"); break;
-        // default: puts("UNKNOWN OPERATOR");
+        case BITW_AND: puts("BITW_AND '&'"); break;
+        case BITW_OR: puts("BITW_OR '|'"); break;
+        case BITW_XOR: puts("BITW_XOR '^'"); break;
+        case LSHIFT: puts("LSHIFT '<<'"); break;
+        case RSHIFT: puts("RSHIFT '>>'"); break;
     }
 }
 
@@ -699,6 +798,12 @@ void write_binop(FILE *fp, AST *ast, int *x, bool flag) {
             fputs("\tcqo\n", fp);
             fputs("\tidiv rcx\n", fp);
             break;
+        case MOD:
+            write_binop_operands(fp, right, left, x, flag);
+            fputs("\tcqo\n", fp);
+            fputs("\tidiv rcx\n", fp);
+            fputs("\tmov rax, rdx\n", fp);
+            break;
         case EQ:
             write_binop_operands(fp, right, left, x, flag);
             fputs("\tcmp rax, rcx\n", fp);
@@ -735,6 +840,26 @@ void write_binop(FILE *fp, AST *ast, int *x, bool flag) {
             fputs("\tcmp rax, rcx\n", fp);
             fputs("\tmov rax, 0\n", fp);
             fputs("\tsetge al\n", fp);
+            break;
+        case BITW_OR:
+            write_binop_operands(fp, left, right, x, flag);
+            fputs("\tor rax, rcx\n", fp);
+            break;
+        case BITW_XOR:
+            write_binop_operands(fp, left, right, x, flag);
+            fputs("\txor rax, rcx\n", fp);
+            break;
+        case BITW_AND:
+            write_binop_operands(fp, left, right, x, flag);
+            fputs("\tand rax, rcx\n", fp);
+            break;
+        case LSHIFT:
+            write_binop_operands(fp, right, left, x, flag);
+            fputs("\tsal rcx, rax\n", fp);
+            break;
+        case RSHIFT:
+            write_binop_operands(fp, right, left, x, flag);
+            fputs("\tshr rcx, rax\n", fp);
             break;
         case LOGIC_OR:
             write_ast(fp, left, x, false);
