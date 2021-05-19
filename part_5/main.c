@@ -6,25 +6,31 @@
 
 typedef struct Token {
     enum {
-        TOKEN_ID, TOKEN_INT, TOKEN_SEMICOLON, TOKEN_EQ,
+        TOKEN_ID, TOKEN_INT, TOKEN_SEMICOLON,
         TOKEN_LPAREN, TOKEN_RPAREN, TOKEN_LBRACE, TOKEN_RBRACE,
         TOKEN_MINUS, TOKEN_TILDE, TOKEN_BANG,
-        TOKEN_PLUS, TOKEN_MUL, TOKEN_DIV, TOKEN_PERCENT,
+        TOKEN_PLUS, TOKEN_STAR, TOKEN_SLASH, TOKEN_PERCENT,
         TOKEN_AMPAMP, TOKEN_PIPEPIPE, TOKEN_EQEQ, TOKEN_NEQ,
         TOKEN_LT, TOKEN_LTE, TOKEN_GT, TOKEN_GTE,
         TOKEN_AMP, TOKEN_PIPE, TOKEN_CARET, TOKEN_LSHIFT, TOKEN_RSHIFT,
+        TOKEN_PLUSPLUS, TOKEN_MINUSMINUS,
+        TOKEN_EQ, TOKEN_PLUSEQ, TOKEN_MINUSEQ,
+        TOKEN_STAREQ, TOKEN_SLASHEQ, TOKEN_PERCENTEQ,
+        TOKEN_AMPEQ, TOKEN_PIPEEQ, TOKEN_CARETEQ,
+        TOKEN_LSHIFTEQ, TOKEN_RSHIFTEQ,
         TOKEN_RETURN
     } type;
     char *value;
 } Token;
 
 enum op_type {
-    NEG, BITW_NOT, LOGIC_NOT,
+    NEG, BITW_NOT, LOGIC_NOT, PRE_INC, PRE_DEC,
     ADD, SUB, MUL, DIV, MOD,
     LT, LTE, GT, GTE, EQ, NEQ,
     LOGIC_AND, LOGIC_OR,
-    BITW_AND, BITW_OR, BITW_XOR,
-    LSHIFT, RSHIFT
+    BITW_AND, BITW_OR, BITW_XOR, LSHIFT, RSHIFT,
+    AS, AS_ADD, AS_SUB, AS_MUL, AS_DIV, AS_MOD,
+    AS_LSHIFT, AS_RSHIFT, AS_BW_AND, AS_BW_OR, AS_BW_XOR
 };
 
 typedef struct AST {
@@ -51,6 +57,7 @@ typedef struct AST {
             struct AST *right;
         } binop;
         struct {
+            int type;
             char *id;
             struct AST *expr;
         } assign;
@@ -86,7 +93,7 @@ typedef struct SymTable {
 // stmt -> "return" expr ";"
 //       | "int" id ["=" expr] ";"
 //       | expr ";"
-// expr -> id "=" expr
+// expr -> id asop expr
 //       | logic-or
 // logic-or -> logic-and {"||" logic-and}
 // logic-and -> bitw-or {"&&" bitw-or}
@@ -100,7 +107,9 @@ typedef struct SymTable {
 // multiplication -> unary {("*" | "/" | "%") unary}
 // unary -> unop unary
 // primary -> "(" exp ")" | int | id
-// unop -> "-" | "~" | "!"
+// unop -> "-" | "~" | "!" | "++" | "--"
+// asop -> "=" | "+=" | "-=" | "*=" | "/=" | "%="
+//       | "&=" | "|=" | "^=" | "<<=" | ">>="
 // int -> [0-9]+
 // id -> [a-zA-Z_][a-zA-Z0-9_]*
 
@@ -109,6 +118,8 @@ void *dmalloc(size_t size);
 void *drealloc(void *p, size_t size);
 int strtoi(char *str);
 void print_spaces(int n);
+bool is_unop(Token *token);
+bool is_asop(Token *token);
 // token && lexer funcs
 Token *token_init(int type, char *value);
 void token_free(Token *token);
@@ -130,7 +141,10 @@ AST *parse_relational(Parser *parser);
 AST *parse_equality(Parser *parser);
 AST *parse_logic_and(Parser *parser);
 AST *parse_logic_or(Parser *parser);
+AST *parse_assignment(Parser *parser, AST *id);
 AST *parse_expr(Parser *parser);
+AST *parse_return(Parser *parser);
+AST *parse_declaration(Parser *parser);
 AST *parse_stmt(Parser *parser);
 AST *parse_func(Parser *parser);
 AST *parse(Parser *parser);
@@ -143,6 +157,7 @@ void setup(FILE *fp);
 void write_unop(FILE *fp, AST *ast);
 void write_binop_operands(FILE *fp, AST *src, AST *dst, int *x, bool flag);
 void write_binop(FILE *fp, AST *ast, int *x, bool flag);
+void write_assignment(FILE *fp, AST *ast, int *x, bool flag);
 void write_ast(FILE *fp, AST *ast, int *x, bool flag);
 // symtable funcs
 VarMap *varmap_init(char *id, int offset);
@@ -237,7 +252,6 @@ void token_free(Token *token) {
 void eat_whitespace(FILE *fp) {
     char c;
     while ((c = getc(fp)) != EOF) {
-        // printf("eat ws %d\n", c);
         if (isspace(c)) continue;
         ungetc(c, fp);
         break;
@@ -251,108 +265,154 @@ char peek(FILE *fp) {
 }
 
 Token *get_next_token(FILE *fp) {
-    char c;
-    while ((c = getc(fp)) != EOF) {
-        // printf("%d\n", c);
-        eat_whitespace(fp);
-        // get identifier
-        if (isalpha(c) || c == '_') {
-            int size = 1;
-            char *id = dmalloc(size);
-            *id = '\0';
-            while (isalnum(c) || c == '_') {
-                id = drealloc(id, ++size);
-                // char *tmp = id;
-                // sprintf(id, "%s%c", tmp, c);
-                strncat(id, &c, 1);
-                c = getc(fp);
-            }
-            ungetc(c, fp);
-            id[size-1] = '\0';
+    eat_whitespace(fp);
+    char c = getc(fp);
+    // get identifier
+    if (isalpha(c) || c == '_') {
+        int size = 1;
+        char *id = dmalloc(size);
+        *id = '\0';
+        while (isalnum(c) || c == '_') {
+            id = drealloc(id, ++size);
+            // char *tmp = id;
+            // sprintf(id, "%s%c", tmp, c);
+            strncat(id, &c, 1);
+            c = getc(fp);
+        }
+        ungetc(c, fp);
+        id[size-1] = '\0';
 
-            if (strcmp(id, "return") == 0) return token_init(TOKEN_RETURN, NULL);
+        if (strcmp(id, "return") == 0) return token_init(TOKEN_RETURN, NULL);
 
-            return token_init(TOKEN_ID, id);
+        return token_init(TOKEN_ID, id);
+    }
+    // get integer literal, no neg int for now
+    // if (isdigit(c) || (c == '-' && isdigit(peek(fp)))) {
+    if (isdigit(c)) {
+        ungetc(c, fp);
+        int size = 1;
+        char *num = dmalloc(size);
+        *num = '\0';
+        while (isdigit((c = getc(fp)))) {
+            num = drealloc(num, ++size);
+            strncat(num, &c, 1);
         }
-        // get integer literal, no neg int for now
-        // if (isdigit(c) || (c == '-' && isdigit(peek(fp)))) {
-        if (isdigit(c)) {
-            ungetc(c, fp);
-            int size = 1;
-            char *num = dmalloc(size);
-            *num = '\0';
-            while (isdigit((c = getc(fp)))) {
-                num = drealloc(num, ++size);
-                strncat(num, &c, 1);
+        ungetc(c, fp);
+        num[size-1] = '\0';
+        return token_init(TOKEN_INT, num);
+    }
+    // get symbols
+    switch (c) {
+        case '(': return token_init(TOKEN_LPAREN, NULL);
+        case ')': return token_init(TOKEN_RPAREN, NULL);
+        case '{': return token_init(TOKEN_LBRACE, NULL);
+        case '}': return token_init(TOKEN_RBRACE, NULL);
+        case ';': return token_init(TOKEN_SEMICOLON, NULL);
+        case '~': return token_init(TOKEN_TILDE, NULL);
+        case '!':
+            if (peek(fp) == '=') {
+                getc(fp);
+                return token_init(TOKEN_NEQ, NULL);
             }
-            ungetc(c, fp);
-            num[size-1] = '\0';
-            return token_init(TOKEN_INT, num);
-        }
-        // get symbols
-        switch (c) {
-            case '(': return token_init(TOKEN_LPAREN, NULL);
-            case ')': return token_init(TOKEN_RPAREN, NULL);
-            case '{': return token_init(TOKEN_LBRACE, NULL);
-            case '}': return token_init(TOKEN_RBRACE, NULL);
-            case ';': return token_init(TOKEN_SEMICOLON, NULL);
-            case '-': return token_init(TOKEN_MINUS, NULL);
-            case '~': return token_init(TOKEN_TILDE, NULL);
-            case '!':
+            return token_init(TOKEN_BANG, NULL);
+        case '+':
+            if (peek(fp) == '+') {
+                getc(fp);
+                return token_init(TOKEN_PLUSPLUS, NULL);
+            }
+            if (peek(fp) == '=') {
+                getc(fp);
+                return token_init(TOKEN_PLUSEQ, NULL);
+            }
+            return token_init(TOKEN_PLUS, NULL);
+        case '-':
+            if (peek(fp) == '-') {
+                getc(fp);
+                return token_init(TOKEN_MINUSMINUS, NULL);
+            }
+            if (peek(fp) == '=') {
+                getc(fp);
+                return token_init(TOKEN_MINUSEQ, NULL);
+            }
+            return token_init(TOKEN_MINUS, NULL);
+        case '*':
+            if (peek(fp) == '=') {
+                getc(fp);
+                return token_init(TOKEN_STAREQ, NULL);
+            }
+            return token_init(TOKEN_STAR, NULL);
+        case '/':
+            if (peek(fp) == '=') {
+                getc(fp);
+                return token_init(TOKEN_SLASHEQ, NULL);
+            }
+            return token_init(TOKEN_SLASH, NULL);
+        case '%':
+            if (peek(fp) == '=') {
+                getc(fp);
+                return token_init(TOKEN_STAREQ, NULL);
+            }
+            return token_init(TOKEN_PERCENT, NULL);
+        case '&':
+            if (peek(fp) == '&') {
+                getc(fp);
+                return token_init(TOKEN_AMPAMP, NULL);
+            }
+            if (peek(fp) == '=') {
+                getc(fp);
+                return token_init(TOKEN_AMPEQ, NULL);
+            }
+            return token_init(TOKEN_AMP, NULL);
+        case '|':
+            if (peek(fp) == '|') {
+                getc(fp);
+                return token_init(TOKEN_PIPEPIPE, NULL);
+            }
+            if (peek(fp) == '=') {
+                getc(fp);
+                return token_init(TOKEN_PIPEEQ, NULL);
+            }
+            return token_init(TOKEN_PIPE, NULL);
+        case '^':
+            if (peek(fp) == '=') {
+                getc(fp);
+                return token_init(TOKEN_CARETEQ, NULL);
+            }
+            return token_init(TOKEN_CARET, NULL);
+        case '<':
+            if (peek(fp) == '=') {
+                getc(fp);
+                return token_init(TOKEN_LTE, NULL);
+            }
+            if (peek(fp) == '<') {
+                getc(fp);
                 if (peek(fp) == '=') {
                     getc(fp);
-                    return token_init(TOKEN_NEQ, NULL);
+                    return token_init(TOKEN_LSHIFTEQ, NULL);
                 }
-                return token_init(TOKEN_BANG, NULL);
-            case '+': return token_init(TOKEN_PLUS, NULL);
-            case '*': return token_init(TOKEN_MUL, NULL);
-            case '/': return token_init(TOKEN_DIV, NULL);
-            case '%': return token_init(TOKEN_PERCENT, NULL);
-            case '&':
-                if (peek(fp) == '&') {
-                    getc(fp);
-                    return token_init(TOKEN_AMPAMP, NULL);
-                }
-                return token_init(TOKEN_AMP, NULL);
-                break;
-            case '|':
-                if (peek(fp) == '|') {
-                    getc(fp);
-                    return token_init(TOKEN_PIPEPIPE, NULL);
-                }
-                return token_init(TOKEN_PIPE, NULL);
-                break;
-            case '^': return token_init(TOKEN_CARET, NULL);
-            case '<':
+                return token_init(TOKEN_LSHIFT, NULL);
+            }
+            return token_init(TOKEN_LT, NULL);
+        case '>':
+            if (peek(fp) == '=') {
+                getc(fp);
                 if (peek(fp) == '=') {
                     getc(fp);
-                    return token_init(TOKEN_LTE, NULL);
+                    return token_init(TOKEN_RSHIFTEQ, NULL);
                 }
-                if (peek(fp) == '<') {
-                    getc(fp);
-                    return token_init(TOKEN_LSHIFT, NULL);
-                }
-                return token_init(TOKEN_LT, NULL);
-                break;
-            case '>':
-                if (peek(fp) == '=') {
-                    getc(fp);
-                    return token_init(TOKEN_GTE, NULL);
-                }
-                if (peek(fp) == '>') {
-                    getc(fp);
-                    return token_init(TOKEN_RSHIFT, NULL);
-                }
-                return token_init(TOKEN_GT, NULL);
-                break;
-            case '=':
-                if (peek(fp) == '=') {
-                    getc(fp);
-                    return token_init(TOKEN_EQEQ, NULL);
-                }
-                return token_init(TOKEN_EQ, NULL);
-                break;
-        }
+                return token_init(TOKEN_GTE, NULL);
+            }
+            if (peek(fp) == '>') {
+                getc(fp);
+                return token_init(TOKEN_RSHIFT, NULL);
+            }
+            return token_init(TOKEN_GT, NULL);
+        case '=':
+            if (peek(fp) == '=') {
+                getc(fp);
+                return token_init(TOKEN_EQEQ, NULL);
+            }
+            return token_init(TOKEN_EQ, NULL);
     }
     return NULL;
 }
@@ -467,17 +527,26 @@ AST *parse_primary(Parser *parser) {
     return node;
 }
 
+bool is_unop(Token *token) {
+    int type = token->type;
+    return type == TOKEN_MINUS    ||
+           type == TOKEN_TILDE    ||
+           type == TOKEN_BANG     ||
+           type == TOKEN_PLUSPLUS ||
+           type == TOKEN_MINUSMINUS;
+}
+
 AST *parse_unary(Parser *parser) {
     AST *node;
     Token *token = parser->cur_token;
-    if (token->type == TOKEN_MINUS ||
-        token->type == TOKEN_TILDE ||
-        token->type == TOKEN_BANG) {
+    if (is_unop(token)) {
         node = ast_init(AST_UNOP);
         switch (token->type) {
             case TOKEN_MINUS: node->node.unop.type = NEG; break;
             case TOKEN_TILDE: node->node.unop.type = BITW_NOT; break;
             case TOKEN_BANG: node->node.unop.type = LOGIC_NOT; break;
+            case TOKEN_PLUSPLUS: node->node.unop.type = PRE_INC; break;
+            case TOKEN_MINUSMINUS: node->node.unop.type = PRE_DEC; break;
             default: err_unexpected_token(token);
         }
         parser_eat(parser, token->type);
@@ -491,14 +560,14 @@ AST *parse_unary(Parser *parser) {
 AST *parse_multiplication(Parser *parser) {
     AST *node = parse_unary(parser); 
     Token *token = parser->cur_token;
-    while (token->type == TOKEN_MUL ||
-           token->type == TOKEN_DIV ||
+    while (token->type == TOKEN_STAR ||
+           token->type == TOKEN_SLASH ||
            token->type == TOKEN_PERCENT) {
         AST *unary = node;
         node = ast_init(AST_BINOP);
         switch (token->type) {
-            case TOKEN_MUL: node->node.binop.type = MUL; break;
-            case TOKEN_DIV: node->node.binop.type = DIV; break;
+            case TOKEN_STAR: node->node.binop.type = MUL; break;
+            case TOKEN_SLASH: node->node.binop.type = DIV; break;
             case TOKEN_PERCENT: node->node.binop.type = MOD; break;
             default: err_unexpected_token(token);
         }
@@ -654,11 +723,35 @@ AST *parse_logic_or(Parser *parser) {
     return node;
 }
 
+bool is_asop(Token *token) {
+    int type = token->type;
+    return type == TOKEN_EQ ||
+           type == TOKEN_PLUSEQ    || type == TOKEN_MINUSEQ  ||
+           type == TOKEN_STAREQ    || type == TOKEN_SLASHEQ  ||
+           type == TOKEN_PERCENTEQ || type == TOKEN_AMPEQ    ||
+           type == TOKEN_PIPEEQ    || type == TOKEN_CARETEQ  ||
+           type == TOKEN_LSHIFTEQ  || type == TOKEN_RSHIFTEQ;
+}
+
 AST *parse_assignment(Parser *parser, AST *id) {
     AST *node = id;
     Token *token = parser->cur_token;
-    if (token->type == TOKEN_EQ) {
+    if (is_asop(token)) {
         node = ast_init(AST_ASSIGN);
+        switch (token->type) {
+            case TOKEN_EQ: node->node.assign.type = AS; break;
+            case TOKEN_PLUSEQ: node->node.assign.type = AS_ADD; break;
+            case TOKEN_MINUSEQ: node->node.assign.type = AS_SUB; break;
+            case TOKEN_STAREQ: node->node.assign.type = AS_MUL; break;
+            case TOKEN_SLASHEQ: node->node.assign.type = AS_DIV; break;
+            case TOKEN_PERCENTEQ: node->node.assign.type = AS_MOD; break;
+            case TOKEN_AMPEQ: node->node.assign.type = AS_BW_AND; break;
+            case TOKEN_PIPEEQ: node->node.assign.type = AS_BW_OR; break;
+            case TOKEN_CARETEQ: node->node.assign.type = AS_BW_XOR; break;
+            case TOKEN_LSHIFTEQ: node->node.assign.type = AS_LSHIFT; break;
+            case TOKEN_RSHIFTEQ: node->node.assign.type = AS_RSHIFT; break;
+            default: err_unexpected_token(token);
+        }
         parser_eat(parser, token->type);
         node->node.assign.id = strdup(id->node.id.value);
         node->node.assign.expr = parse_expr(parser);
@@ -681,14 +774,14 @@ AST *parse_return(Parser *parser) {
 
 AST *parse_declaration(Parser *parser) {
     AST *node = ast_init(AST_DECLARE);
-
     // eat type specifier
-    // debug_print_token(parser->cur_token);
     parser_eat(parser, TOKEN_ID);
+
     // AST *id = parse_primary(parser);
     Token *id = parser->cur_token;
     node->node.declare.id = strdup(id->value);
     parser_eat(parser, TOKEN_ID);
+
     node->node.declare.expr = NULL;
     Token *token = parser->cur_token;
     if (token->type == TOKEN_EQ) {
@@ -766,8 +859,8 @@ void debug_print_token(Token *token) {
         case TOKEN_TILDE: puts("TOKEN_TILDE: '~'"); break;
         case TOKEN_BANG: puts("TOKEN_BANG: '!'"); break;
         case TOKEN_PLUS: puts("TOKEN_PLUS: '+'"); break;
-        case TOKEN_MUL: puts("TOKEN_MUL: '*'"); break;
-        case TOKEN_DIV: puts("TOKEN_DIV: '/'"); break;
+        case TOKEN_STAR: puts("TOKEN_STAR: '*'"); break;
+        case TOKEN_SLASH: puts("TOKEN_SLASH: '/'"); break;
         case TOKEN_PERCENT: puts("TOKEN_PERCENT: '%'"); break;
         case TOKEN_LT: puts("TOKEN_LT '<'"); break;
         case TOKEN_LTE: puts("TOKEN_LTE '<='"); break;
@@ -784,6 +877,18 @@ void debug_print_token(Token *token) {
         case TOKEN_RSHIFT: puts("TOKEN_RSHIFT '>>'"); break;
         case TOKEN_EQ: puts("TOKEN_EQ '='"); break;
         case TOKEN_RETURN: puts("TOKEN_RETURN 'return'"); break;
+        case TOKEN_PLUSPLUS: puts("TOKEN_PLUSPLUS '++'"); break;
+        case TOKEN_MINUSMINUS: puts("TOKEN_MINUSMINUS '--'"); break;
+        case TOKEN_PLUSEQ: puts("TOKEN_PLUSEQ '+='"); break;
+        case TOKEN_MINUSEQ: puts("TOKEN_MINUSEQ '-='"); break;
+        case TOKEN_STAREQ: puts("TOKEN_STAREQ '*='"); break;
+        case TOKEN_SLASHEQ: puts("TOKEN_SLASHEQ '/='"); break;
+        case TOKEN_PERCENTEQ: puts("TOKEN_PERCENTEQ '%='"); break;
+        case TOKEN_AMPEQ: puts("TOKEN_AMPEQ '&='"); break;
+        case TOKEN_PIPEEQ: puts("TOKEN_PIPEEQ '|='"); break;
+        case TOKEN_CARETEQ: puts("TOKEN_CARETEQ '^='"); break;
+        case TOKEN_LSHIFTEQ: puts("TOKEN_LSHIFTEQ '<<='"); break;
+        case TOKEN_RSHIFTEQ: puts("TOKEN_RSHIFTEQ '>>='"); break;
         // default: puts("UNKNOWN TOKEN");
     }
 }
@@ -811,6 +916,19 @@ void debug_print_op(int op_type) {
         case BITW_XOR: puts("BITW_XOR '^'"); break;
         case LSHIFT: puts("LSHIFT '<<'"); break;
         case RSHIFT: puts("RSHIFT '>>'"); break;
+        case PRE_INC: puts("PRE_INC '++'"); break;
+        case PRE_DEC: puts("PRE_DEC '--'"); break;
+        case AS: puts("AS '='"); break;
+        case AS_ADD: puts("AS_ADD '+='"); break;
+        case AS_SUB: puts("AS_SUB '-='"); break;
+        case AS_MUL: puts("AS_MUL '*='"); break;
+        case AS_DIV: puts("AS_DIV '/='"); break;
+        case AS_MOD: puts("AS_MOD '%='"); break;
+        case AS_BW_AND: puts("AS_BW_AND '&='"); break;
+        case AS_BW_OR: puts("AS_BW_OR '|='"); break;
+        case AS_BW_XOR: puts("AS_BW_xOR '^='"); break;
+        case AS_LSHIFT: puts("AS_LSHIFT '<<='"); break;
+        case AS_RSHIFT: puts("AS_RSHIFT '>>='"); break;
     }
 }
 
@@ -880,6 +998,9 @@ void debug_print_ast(AST *ast, int n) {
             puts("AST_ASSIGN:");
 
             n += 2;
+            print_spaces(n); printf("type: ");
+            debug_print_op(ast->node.assign.type);
+
             print_spaces(n);
             printf("id: %s\n", ast->node.assign.id);
 
@@ -896,11 +1017,12 @@ void debug_print_ast(AST *ast, int n) {
             puts("type: int");
             
             print_spaces(n);
-            printf("id: %s\n", ast->node.assign.id);
+            printf("id: %s\n", ast->node.declare.id);
 
             print_spaces(n);
             puts("expr:");
-            debug_print_ast(ast->node.assign.expr, n + 2);
+            // if (ast->node.assign.expr == NULL) puts("\tnull");
+            debug_print_ast(ast->node.declare.expr, n + 2);
             break;
     }
 }
@@ -922,6 +1044,12 @@ void write_unop(FILE *fp, AST *ast) {
             fputs("\tcmp rax, 0\n", fp);
             fputs("\tmov rax, 0\n", fp);
             fputs("\tsete al\n", fp);
+            break;
+        case PRE_INC:
+            fputs("\tinc rax\n", fp);
+            break;
+        case PRE_DEC:
+            fputs("\tdec rax\n", fp);
             break;
     }
 }
@@ -1039,6 +1167,41 @@ void write_binop(FILE *fp, AST *ast, int *x, bool flag) {
     }
 }
 
+void write_assignment(FILE *fp, AST *ast, int *x, bool flag) {
+    char *ident = ast->node.assign.id;
+    VarMap *var = symtable_get(global_st, ident);
+    if (var == NULL) {
+        fprintf(stderr, "err undeclared variable '%s'\n", ident);
+        exit(1);
+    }
+    int type = ast->node.assign.type;
+    if (type == AS) {
+        write_ast(fp, ast->node.assign.expr, x, flag);
+    } else {
+        AST *binop = ast_init(AST_BINOP);
+        AST *left = ast_init(AST_ID);
+        left->node.id.value = ident;
+        binop->node.binop.left = left;
+        binop->node.binop.right = ast->node.assign.expr;
+
+        switch (ast->node.assign.type) {
+            case AS_ADD: binop->node.binop.type = ADD; break;
+            case AS_SUB: binop->node.binop.type = SUB; break;
+            case AS_MUL: binop->node.binop.type = MUL; break;
+            case AS_DIV: binop->node.binop.type = DIV; break;
+            case AS_MOD: binop->node.binop.type = MOD; break;
+            case AS_BW_AND: binop->node.binop.type = BITW_AND; break;
+            case AS_BW_OR: binop->node.binop.type = BITW_OR; break;
+            case AS_BW_XOR: binop->node.binop.type = BITW_XOR; break;
+            case AS_LSHIFT: binop->node.binop.type = LSHIFT; break;
+            case AS_RSHIFT: binop->node.binop.type = RSHIFT; break;
+        }
+        write_ast(fp, binop, x, flag);
+    }
+    int offset = var->stack_offset;
+    fprintf(fp, "\tmov [rbp-%d], rax\n", offset);
+}
+
 void write_ast(FILE *fp, AST *ast, int *x, bool flag) {
     char *ident;
     int offset;
@@ -1048,7 +1211,7 @@ void write_ast(FILE *fp, AST *ast, int *x, bool flag) {
             fprintf(fp, "\tmov rax, %d\n", ast->node.integer.value);
             break;
         case AST_ID:
-            ident = ast->node.assign.id;
+            ident = ast->node.id.value;
             var = symtable_get(global_st, ident);
             if (var == NULL) {
                 fprintf(stderr, "err undeclared variable '%s'\n", ident);
@@ -1103,15 +1266,7 @@ void write_ast(FILE *fp, AST *ast, int *x, bool flag) {
             }
             break;
         case AST_ASSIGN:
-            ident = ast->node.assign.id;
-            var = symtable_get(global_st, ident);
-            if (var == NULL) {
-                fprintf(stderr, "err undeclared variable '%s'\n", ident);
-                exit(1);
-            }
-            write_ast(fp, ast->node.assign.expr, x, flag);
-            offset = var->stack_offset;
-            fprintf(fp, "\tmov [rbp-%d], rax\n", offset);
+            write_assignment(fp, ast, x, flag);
             break;
         case AST_DECLARE:
             ident = ast->node.declare.id;

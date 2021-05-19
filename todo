@@ -25,7 +25,7 @@ checklist:
 TODO:
 - [x] implement more binop (%, &, |, ^, <<, >>)
 - [x] use keyword tokens
-- [ ] implement more assignment ops (+=, -=, *=, /=, %=, <<=, >>=, &=, |=, ^=)
+- [x] implement more assignment ops (+=, -=, *=, /=, %=, <<=, >>=, &=, |=, ^=)
 - [ ] comma operators
 - [ ] 
     
