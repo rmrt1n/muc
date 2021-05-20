@@ -1,6 +1,6 @@
 CC=gcc
 FLAGS=-g -Wall
-SRC=part_5/main.c
+SRC=part_6/main.c
 
 main: $(SRC)
 	$(CC) $(FLAGS) $(SRC) -o muc.out

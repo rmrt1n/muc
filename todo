@@ -4,7 +4,7 @@ checklist:
 03. [x] unary operators
 04. [x] binary operators
 05. [x] local variables
-06. [ ] conditionals
+06. [x] conditionals
 07. [ ] compound statements
 08. [ ] loops
 09. [ ] functions
@@ -12,11 +12,11 @@ checklist:
 11. [ ] characters?
 12. [ ] arrays?
 13. [ ] includes?
-14. [ ] ternary operators?
+14. [x] ternary operators?
 15. [ ] structs?
 16. [ ] enums?
 17. [ ] unions?
-18. [ ] postfix unary operators?
+18. [ ] postfix operators? *
 19. [ ] strings?
 20. [ ] types?
 21. [ ] pointers?
