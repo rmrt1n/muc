@@ -12,7 +12,7 @@ checklist:
 11. [ ] characters?
 12. [ ] arrays?
 13. [ ] includes?
-14. [x] ternary operators?
+14. [x] ternary operators
 15. [ ] structs?
 16. [ ] enums?
 17. [ ] unions?
