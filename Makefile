@@ -9,4 +9,4 @@ asm: muc.out
 	gcc *.s -o asm.out
 	./get_err.sh
 clean:
-	rm *.s *.out
+	rm *.s *.c *.out

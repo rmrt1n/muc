@@ -1442,6 +1442,9 @@ void write_block(FILE *fp, AST *ast, SymTable *env,
             write_ast(fp, item, cur_env, si, x, flag);
         }
     }
+    int bytes_to_dealloc = 8 * cur_env->used;
+    fprintf(fp, "\tadd rsp, %d\n", bytes_to_dealloc);
+    *si -= bytes_to_dealloc;
 }
 
 void write_func(FILE *fp, AST *ast, int *x, bool flag) {
