@@ -5,7 +5,7 @@ checklist:
 04. [x] binary operators
 05. [x] local variables
 06. [x] conditionals
-07. [ ] compound statements
+07. [x] compound statements
 08. [ ] loops
 09. [ ] functions
 10. [ ] global variables
