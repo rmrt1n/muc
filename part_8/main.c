@@ -1785,9 +1785,17 @@ void write_ast(FILE *fp, AST *ast, SymTable *env, State state) {
             write_for(fp, ast, env, state);
             break;
         case AST_CONTINUE:
+            if (state.cont_label == 0) {
+                fputs("err continue not in loop\n", stderr);
+                exit(1);
+            }
             fprintf(fp, "\tjmp .L%d\n", state.cont_label);
             break;
         case AST_BREAK:
+            if (state.break_label == 0) {
+                fputs("err break not in loop\n", stderr);
+                exit(1);
+            }
             fprintf(fp, "\tjmp .L%d\n", state.break_label);
             break;
         default:
