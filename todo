@@ -6,7 +6,7 @@ checklist:
 05. [x] local variables
 06. [x] conditionals
 07. [x] compound statements
-08. [ ] loops
+08. [x] loops
 09. [ ] functions
 10. [ ] global variables
 11. [ ] characters?
@@ -20,6 +20,7 @@ checklist:
 19. [ ] strings?
 20. [ ] types?
 21. [ ] pointers?
+22. [ ] switch statements?
 22. [ ] 
 
 TODO:
@@ -27,5 +28,6 @@ TODO:
 - [x] use keyword tokens
 - [x] implement more assignment ops (+=, -=, *=, /=, %=, <<=, >>=, &=, |=, ^=)
 - [ ] comma operators
+- [ ] switch to pratt parser?
 - [ ] 
     
